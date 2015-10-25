@@ -1,0 +1,16 @@
+{
+  "name": "was",
+  "description": "The WAS Chef environment",
+  "override_attributes": {
+    "im": {
+      "install_zip": {
+        "url": "http://192.168.228.163:8080/agent.installer.aix.gtk.ppc_1.8.3000.20150606_0047.zip"
+      }
+    },
+    "was": {
+      "installer": {
+        "url": "http://192.168.228.163:8080/WASND_8.5.5.tar"
+      }
+    }
+  }
+}

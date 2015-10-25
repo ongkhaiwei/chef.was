@@ -1,0 +1,151 @@
+# Cookbook Name:: websphere_application_server
+#
+# (C) Copyright IBM Corporation 2014.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# Jython script to configure an LDAP realm for WAS
+
+# docs:
+#     http://pic.dhe.ibm.com/infocenter/wasinfo/v6r1/index.jsp?topic=%2Fcom.ibm.websphere.express.doc%2Finfo%2Fexp%2Fae%2Frxml_atidmgrrepositoryconfig.html
+
+# List existing repositories
+# TODO: Actually check the result?
+print AdminTask.listIdMgrRepositories()
+# Should return '{InternalFileRepository={repositoryType=File,host=LocalHost}}'
+
+# Configure the Admin User Registry, keeping the WAS admin in the file-based registry
+AdminTask.configureAdminWIMUserRegistry([ 
+  "-realmName", "defaultWIMFileBasedRealm",
+  "-verifyRegistry", "false"
+  ])
+
+# someone made a function that is supposed to return a dict return a dict marshalled to a string
+# and we can't import ast and do ast.literal_eval because ast isn't packaged with WAS
+existing_repos = AdminTask.listIdMgrRepositories()
+print "The existing User Repositories are: " + existing_repos
+#this is a dict string like
+# {InternalFileRepository={repositoryType=File, host=LocalHost}, LDAP1={repositoryType=LDAP, specificRepositoryType=AD, host=connector-dev.bigdatalab.ibm.com}}
+
+ldap = "<%= @ldap[:id] %>"
+repo_exists = existing_repos.find(ldap) != -1
+if repo_exists:
+  print "Found the LDAP Repository [" + ldap + "]. Skipping creation."
+else:
+  # Add the LDAP server
+  print "Creating the LDAP Repository..."
+  AdminTask.createIdMgrLDAPRepository([
+    "-default", "true",
+    "-id", ldap,
+    "-adapterClassName", "com.ibm.ws.wim.adapter.ldap.LdapAdapter",
+    "-ldapServerType", "<%= @ldap[:server_type] %>",
+    "-sslConfiguration",
+    "-certificateMapMode", "exactdn",
+    "-supportChangeLog", "none",
+    "-certificateFilter",
+    "-loginProperties", "<%= @ldap[:login_properties].join(";") %>"
+    ])
+
+existing_server = AdminTask.listIdMgrLDAPServers(["-id", ldap])
+print "Querying for the LDAP server with id [" + ldap + "] returned: [" + existing_server + "]"
+if existing_server.find(ldap) != -1:
+  print "Found the LDAP server [" + ldap + "]. Skipping adding it."
+else:
+  print "Adding the LDAP server..."
+  try:
+    AdminTask.addIdMgrLDAPServer([
+      "-id", ldap,
+      "-ldapServerType", "<%= @ldap[:server_type] %>",
+      "-host", "<%= @ldap[:host] %>",
+      "-port", "<%= @ldap[:port] %>",
+      '-bindDN', "<%= @ldap[:bind_dn] %>",
+      "-bindPassword", "<%= @ldap[:bind_password] %>",
+      "-authentication", "simple",
+      "-referal", "ignore",
+      "-sslEnabled", "false",
+      "-sslConfiguration",
+      "-certificateMapMode", "exactdn",
+      "-certificateFilter"
+      ])
+  except :
+    print "If you get a NullPointerException here, it's probably because of a bad bindDN name or password."
+    print "Note, DNs can be CASE SENSITIVE!"
+    ( kind, value ) = sys.exc_info()[ :2 ]
+    raise value
+
+# Both name and nameInRepository must be specified, otherwise, you'll get a NullPointerException
+# when attempting to set the Group and User searchBase
+existing_repobe = AdminTask.listIdMgrRepositoryBaseEntries(["-id", ldap])
+print "The Base Entries for [" + ldap + "] are: [" + existing_repobe + "]"
+if existing_repobe != "{}":
+  print "Found the base entries [" + existing_repobe + "]. Skipping adding them."
+else:
+  print "Adding the base entry..."
+  AdminTask.addIdMgrRepositoryBaseEntry([
+    "-id", ldap,
+    "-name", "<%= @ldap[:base_dn] %>",
+    "-nameInRepository", "<%= @ldap[:base_dn] %>"
+    ])
+
+# there is no list method for RealmBaseEntry
+print "Adding the realm base entry..."
+AdminTask.addIdMgrRealmBaseEntry([
+  "-name", "defaultWIMFileBasedRealm",
+  "-baseEntry", "<%= @ldap[:base_dn] %>"
+  ])
+
+# Validate the wasadmin
+if AdminTask.validateAdminName('[-registryType WIMUserRegistry -adminUser wasadmin]') != 'true':
+  raise Exception('Failed to validate the admin user "wasadmin"')
+
+# Enable Global Security and set Federated Repositories to be default
+print "Enabling global security and setting Federated Repositories to be default..."
+AdminTask.setAdminActiveSecuritySettings([
+  "-activeUserRegistry", "WIMUserRegistry",
+  "-enableGlobalSecurity", "true"
+  ])
+
+# Set the LDAP search filters for entities
+<% @ldap[:entities].each do |entity| %>
+try:
+  AdminTask.updateIdMgrLDAPEntityType([
+    "-id", ldap,
+    "-name", "<%= entity[:name] %>",
+    "-objectClasses", "<%= entity[:object_classes].join(";") %>",
+    '-searchBases', "<%= entity[:search_bases].join(";") %>",
+    "-searchFilter", "<%= entity[:search_filter] %>"
+    ])
+except :
+  print "There was an exception while trying to set up the <%= entity[:name] %> search base. " \
+      "Note: searchBases are case-sensitive and must be equal to the Base Entry or a child of it."
+  ( kind, value ) = sys.exc_info()[ :2 ]
+  value.printStackTrace()
+  raise value
+<% end %>
+
+# Turn on Application Security
+securityConfigId = AdminConfig.getid("/Security:/")
+AdminConfig.modify(securityConfigId, [['appEnabled', 'true']])
+
+# Save the changes
+AdminConfig.save()
+
+# Validate the changes
+# TODO: Actually check the result?
+print AdminTask.listIdMgrRepositories()
+# Should return '{InternalFileRepository={repositoryType=File, host=LocalHost}, LDAP1={repositoryType=LDAP, specificRepositoryType=IDS, host=bluepages.ibm.com}}'
+print AdminTask.listIdMgrRepositoryBaseEntries(["-id", ldap])
+# Should return '{o=ibm.com=o=ibm.com}'
+
+# vi: set ft=python shiftwidth=2 tabstop=4 :
